@@ -1,3 +1,3 @@
-mod checker;
-mod module;
-mod loader;
+pub mod checker;
+pub mod module;
+pub mod loader;

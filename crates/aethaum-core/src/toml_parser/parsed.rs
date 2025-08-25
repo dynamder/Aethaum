@@ -106,8 +106,8 @@ impl AethaumType {
     pub fn to_rust_type(&self) -> Ident {
         match self {
             AethaumType::Primitive(primitive) => match primitive {
-                PrimitiveType::Float => Ident::new("f32", Span::call_site()),
-                PrimitiveType::Int => Ident::new("i32", Span::call_site()),
+                PrimitiveType::Float => Ident::new("f64", Span::call_site()),
+                PrimitiveType::Int => Ident::new("i64", Span::call_site()),
                 PrimitiveType::Bool => Ident::new("bool", Span::call_site()),
                 PrimitiveType::Str => Ident::new("String", Span::call_site()),
             },
@@ -174,12 +174,26 @@ impl std::fmt::Display for ComponentRef {
         write!(f, "{}", self.as_path_str())
     }
 }
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone)] //TODO: check if there is any conflict when construct
 pub struct ComponentConstraint {
     include: Option<Vec<ComponentRef>>, //必须包含的组件
     exclude: Option<Vec<ComponentRef>>, //必须不包含的组件
 }
 impl ComponentConstraint {
+    pub fn new_empty() -> Self {
+        Self {
+            include: Some(vec![]),
+            exclude: Some(vec![]),
+        }
+    }
+    pub fn with_include(mut self, include: Vec<ComponentRef>) -> Self {
+        self.include = Some(include);
+        self
+    }
+    pub fn with_exclude(mut self, exclude: Vec<ComponentRef>) -> Self {
+        self.exclude = Some(exclude);
+        self
+    }
     pub fn chained_iter(&self) -> impl Iterator<Item = &ComponentRef> { //TODO: test it
         self.include.iter().flatten().chain(self.exclude.iter().flatten())
     }
