@@ -1,0 +1,8 @@
+# Aethaum Configuration File
+
+[engine]
+tick_rate = 60
+
+[logging]
+level = "info"
+        
