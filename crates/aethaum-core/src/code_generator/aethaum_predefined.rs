@@ -1,6 +1,11 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
+pub fn predefined() -> TokenStream {
+    let mut predefined = trait_describe();
+    predefined.extend(event_aethaum_spawn_entity());
+    predefined
+ }
 pub fn trait_describe() -> TokenStream {
     quote! {
         pub trait Describe {

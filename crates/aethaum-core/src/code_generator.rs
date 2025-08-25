@@ -2,14 +2,39 @@ mod transpile;
 mod lua_binding;
 mod aethaum_predefined;
 mod utils;
+mod project_template;
 
+use std::fs;
+use std::path::Path;
 use bevy_ecs::event::Events;
+use proc_macro2::TokenStream;
 use thiserror::Error;
+use crate::ecs::module::AethaumProject;
 
-#[derive(Debug,Error)]
-pub enum TranspileError {
-    #[error("Error to write generated code, {0}")]
-    WriteError(#[from] core::fmt::Error),
-    #[error("Error to format generated code, {0}")]
-    FormatError(#[from] syn::Error)
+#[derive(Error, Debug)]
+pub enum CodeGenerationError {
+    #[error("IO error when generating code: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Transpile error when generating code: {0}")]
+    Transpile(#[from] transpile::TranspileError),
+    #[error("Template Generation error when generating code: {0}")]
+    TemplateGeneration(#[from] project_template::TemplateGenerationError),
+}
+pub struct CodeGenerator {
+    project: AethaumProject
+}
+impl CodeGenerator {
+    pub fn new(project: AethaumProject) -> Self {
+        Self {
+            project
+        }
+    }
+    pub fn generate(&self) -> Result<(), CodeGenerationError> {
+        Ok(())
+    }
+    fn write_code_to_file(path: &Path, content: TokenStream) -> Result<(), CodeGenerationError> {
+        let formatted_code = utils::format_rust_code(content)?;
+        fs::write(path, formatted_code)?;
+        Ok(())
+    }
 }

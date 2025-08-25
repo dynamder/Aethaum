@@ -1,8 +1,23 @@
+use std::fmt::format;
 use quote::quote;
-use crate::code_generator::TranspileError;
-use crate::toml_parser::parsed::{Component, Describable, EntityProto, Event, Field, System, SystemQuery};
+use crate::toml_parser::parsed::{Component, Describable, EntityProto, Event, Field, System, SystemEventHandler, SystemQuery, SystemUpdate};
 use proc_macro2::{Span, TokenStream};
 use syn::Ident;
+use thiserror::Error;
+use crate::ecs::module::EcsModule;
+
+#[derive(Debug,Error)]
+pub enum TranspileError {
+    #[error("Error to write generated code, {0}")]
+    WriteError(#[from] core::fmt::Error),
+    #[error("Error to format generated code, {0}")]
+    FormatError(#[from] syn::Error),
+    #[error("Multiple errors occurred during transpiling:\n{}",
+        .errors.iter().map(|e| format!("  - {}", e)).collect::<Vec<_>>().join("\n"))]
+    Multiple {
+        errors: Vec<TranspileError>,
+    }
+}
 
 pub trait Transpile {
     fn transpile(&self) -> Result<TokenStream, TranspileError>;
@@ -154,13 +169,37 @@ impl Transpile for EntityProto {
         let spawn_system_name = Ident::new(&format!("spawn_{}_system", self.name.to_lowercase()), Span::call_site());
 
         // 生成 Bundle 字段
+        let mut errors = Vec::new();
+
         let bundle_fields = self.components.iter().map(|component_ref| {
             let component_name = Ident::new(component_ref.name.as_str(), Span::call_site());
-            quote! {
-                pub #component_name: #component_name,
+            let component_type_str = match &component_ref.module_name {
+                Some(module_name) => format!("{}::components::{}", module_name, component_name),
+                None => format!("components::{}", component_name),
+            };
+            let component_type = syn::parse_str::<syn::Type>(&component_type_str);
+            match component_type {
+                Ok(component_type) => {
+                    quote! {
+                        #component_name: #component_type,
+                    }
+                },
+                Err(err) => {
+                    errors.push(
+                        TranspileError::FormatError(err)
+                    );
+                    quote! {}
+                }
             }
         }).collect::<Vec<_>>();
-
+        if !errors.is_empty() {
+            if errors.len() == 1 {
+                return Err(errors.pop().unwrap());
+            }else {
+                return Err(TranspileError::Multiple{errors});
+            }
+        }
+        
         // 生成描述实现
         let description_impl = transpile_descriptions(self, self.name.as_str());
 
@@ -209,7 +248,11 @@ impl Transpile for SystemQuery {
             // 处理 With 过滤器（包含的组件）
             if let Some(include_components) = self.component_constraint.get_include() {
                 for component_ref in include_components {
-                    let component_name = Ident::new(&component_ref.as_path_str(), Span::call_site());
+                    let component_module_path = match &component_ref.module_name {
+                        Some(module_name) => format!("{}::components::{}", module_name, component_ref.name),
+                        None => format!("components::{}", component_ref.name),
+                    };
+                    let component_name = syn::parse_str::<syn::Type>(&component_module_path)?;
                     filters.push(quote! { With<#component_name> });
                 }
             }
@@ -217,7 +260,11 @@ impl Transpile for SystemQuery {
             // 处理 Without 过滤器（排除的组件）
             if let Some(exclude_components) = self.component_constraint.get_exclude() {
                 for component_ref in exclude_components {
-                    let component_name = Ident::new(&component_ref.as_path_str(), Span::call_site());
+                    let component_module_path = match &component_ref.module_name {
+                        Some(module_name) => format!("{}::components::{}", module_name, component_ref.name),
+                        None => format!("components::{}", component_ref.name),
+                    };
+                    let component_name = syn::parse_str::<syn::Type>(&component_module_path)?;
                     filters.push(quote! { Without<#component_name> });
                 }
             }
@@ -239,15 +286,165 @@ impl Transpile for SystemQuery {
 }
 impl Transpile for System {
     fn transpile(&self) -> Result<TokenStream, TranspileError> {
-        let name = Ident::new(self.normal.name.as_str(), Span::call_site());
-        let queries = {
-            self.queries.iter()
-                .map(|query| {
-                    query.transpile().unwrap() //ROBUST: the Transpile for Query will always succeed
+        let system_name = Ident::new(self.normal.name.as_str(), Span::call_site());
+
+        // 生成查询参数
+        let queries = self.queries.iter()
+            .map(|query| query.transpile().unwrap())
+            .collect::<Vec<_>>();
+
+        let query_params = self.queries.iter()
+            .map(|s_query| Ident::new(s_query.name.as_str(), Span::call_site()))
+            .collect::<Vec<_>>();
+
+        // 生成 update 系统（如果存在）
+        let update_system = if let Some(update) = &self.update {
+            let update_system_name = Ident::new("update", Span::call_site());
+            quote! {
+                pub fn #update_system_name(
+                    mut commands: Commands,
+                    #(#query_params: #queries,)*
+                ) {
+                    // Update logic would go here
+                }
+            }
+        } else {
+            quote! {}
+        };
+        let mut errors = Vec::new();
+
+        // 生成事件处理系统
+        let event_handler_systems = self.event_handlers.iter()
+            .map(|event_handler| {
+                let handler_system_name = Ident::new(
+                    &format!("{}_on_{}",
+                             self.normal.name.to_lowercase(),
+                             event_handler.watch_for.as_path_str().to_lowercase()),
+                    Span::call_site()
+                );
+                let event_module_path = match &event_handler.watch_for.module_name {
+                    Some(module_name) => format!("{}::events::{}", module_name, event_handler.watch_for),
+                    None => format!("events::{}", event_handler.watch_for),
+                };
+                let event_type = syn::parse_str::<syn::Type>(&event_module_path);
+                match event_type {
+                    Ok(event_type) => {
+                        quote! {
+                            pub fn #handler_system_name(
+                                mut commands: Commands,
+                                mut event_reader: EventReader<#event_type>,
+                                #(#query_params: #queries,)*
+                            ) {
+                                for event in event_reader.read() {
+                                    // Event handling logic would go here
+                                }
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        errors.push(
+                            TranspileError::FormatError(err)
+                        );
+                        quote! {}
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if !errors.is_empty() {
+            if errors.len() == 1 {
+                return Err(errors.pop().unwrap()); //ROBUST: must have one element
+            } else {
+                return Err(TranspileError::Multiple{errors});
+            }
+        }
+
+        let description_impl = transpile_descriptions(self, self.normal.name.as_str());
+
+        Ok(quote! {
+            pub struct #system_name;
+
+            impl #system_name {
+                #update_system
+
+                #(#event_handler_systems)*
+            }
+
+            #description_impl
+        })
+    }
+}
+impl Transpile for EcsModule {
+    fn transpile(&self) -> Result<TokenStream, TranspileError> {
+        let components_token = if let Some(components) = &self.components {
+            components.iter()
+                .map(|component| component.transpile().unwrap())
+                .collect::<Vec<_>>()
+            //ROBUST: this transpile could never fail
+        }else {
+            vec![]
+        };
+        let events_token = if let Some(events) = &self.events {
+            events.iter()
+                .map(|event| event.transpile().unwrap())
+                .collect::<Vec<_>>()
+        }else {
+            vec![]
+        };
+        let entity_proto_token = if let Some(entity_protos) = &self.entity_protos {
+            entity_protos.iter()
+                .map(|entity_prototype| entity_prototype.transpile().unwrap())
+                .collect::<Vec<_>>()
+        }else {
+            vec![]
+        };
+        let mut errors = vec![];
+        let systems_token = if let Some(systems) = &self.systems {
+            systems.iter()
+                .map(|system| {
+                    match system.transpile() {
+                        Ok(token) => token,
+                        Err(err) => {
+                            errors.push(err);
+                            quote! {}
+                        }
+                    }
                 })
                 .collect::<Vec<_>>()
+        }else {
+            vec![]
         };
-        todo!("transpile System")
+        if !errors.is_empty() {
+            if errors.len() == 1 {
+                return Err(errors.pop().unwrap()); //ROBUST: must have one element
+            }else {
+                return Err(TranspileError::Multiple { errors});
+            }
+        }
+        Ok(
+            quote! {
+                use bevy::prelude::*;
+                use aethaum_predefined::*;
+
+                pub mod components {
+                    use super::*;
+                    #(#components_token)*
+                }
+
+                pub mod events {
+                    use super::*;
+                    #(#events_token)*
+                }
+                pub mod entity_protos {
+                    use super::*;
+                    #(#entity_proto_token)*
+                }
+                pub mod systems {
+                    use super::*;
+                    #(#systems_token)*
+                }
+            }
+        )
     }
 }
 
@@ -256,7 +453,8 @@ impl Transpile for System {
 mod tests {
     use smart_string::SmartString;
     use crate::code_generator::utils::format_rust_code;
-    use crate::toml_parser::parsed::{AethaumType, ComponentField, ComponentRef, EventField, PrimitiveType};
+    use crate::ecs::loader::ModuleFileLoader;
+    use crate::toml_parser::parsed::{AethaumType, ComponentConstraint, ComponentField, ComponentRef, EventField, EventRef, PrimitiveType, SystemNormal};
     use super::*;
     #[test]
     fn test_transpile_component() {
@@ -320,6 +518,59 @@ mod tests {
             ]
         };
         let transpiled = event.transpile().unwrap();
+        println!("{}", transpiled);
+        let transpiled = format_rust_code(transpiled).unwrap();
+        println!("{}", transpiled);
+        let parsed_result = syn::parse_str::<syn::File>(&transpiled);
+        assert!(parsed_result.is_ok(), "Generated code has syntax errors: {:?}", parsed_result.err());
+    }
+    #[test]
+    fn test_transpile_system() {
+        let system = System {
+           normal: SystemNormal {
+               name: "TestSystem".into(),
+               description: Some("This is a test system".into()),
+               category: None,
+               priority: None,
+           },
+            queries: vec![
+                SystemQuery {
+                    name: SmartString::from("TestQuery"),
+                    description: None,
+                    component_constraint: ComponentConstraint::new_empty().with_include(
+                        vec![ComponentRef::new(Some("TestComponent"), "test_component")]
+                    ).with_exclude(
+                        vec![ComponentRef::new(Some("TestComponent222"), "test_component")]
+                    )
+                }
+            ],
+            update: Some(SystemUpdate {
+                interval: Default::default(),
+                condition: None,
+                logic: None,
+            }),
+            event_handlers: vec![
+                SystemEventHandler {
+                    watch_for: EventRef::new(None::<&str>, "click"),
+                    priority: 0,
+                    logic: None,
+                }
+            ]
+        };
+        let transpiled = system.transpile().unwrap();
+        println!("{}", transpiled);
+        let transpiled = format_rust_code(transpiled).unwrap();
+        println!("{}", transpiled);
+        let parsed_result = syn::parse_str::<syn::File>(&transpiled);
+        assert!(parsed_result.is_ok(), "Generated code has syntax errors: {:?}", parsed_result.err());
+    }
+    #[test]
+    fn test_transpile_module() {
+        let module = ModuleFileLoader::new(
+            r#"D:\Aethaum\test_project\modules\explore"#.into(),
+            "explore".into()
+        ).load().unwrap();
+        let transpiled = module.transpile().unwrap();
         println!("{}", transpiled);
         let transpiled = format_rust_code(transpiled).unwrap();
         println!("{}", transpiled);
