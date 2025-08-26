@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::fmt::format;
+use convert_case::Casing;
 use quote::quote;
 use crate::toml_parser::parsed::{Component, Describable, EntityProto, Event, Field, System, SystemEventHandler, SystemQuery, SystemUpdate};
 use proc_macro2::{Span, TokenStream};
@@ -71,7 +73,7 @@ fn transpile_descriptions<T: Describable>(to_transpile: &T, name: &str) -> Token
 
     quote! {
         impl Describe for #name {
-            fn description(&self) -> &'static str {
+            fn describe(&self) -> &'static str {
                 #struct_desc
             }
 
@@ -129,7 +131,7 @@ impl Transpile for Component {
         let description_impl = transpile_descriptions(self,self.name.as_str());
 
         Ok(quote! {
-            #[derive(Component)]
+            #[derive(Component, Reflect)]
             pub struct #name {
                 #(#fields)*
             }
@@ -224,14 +226,17 @@ impl Transpile for EntityProto {
             // 为这个原型生成对应的处理系统
             pub fn #spawn_system_name(
                 mut events: EventReader<AethaumSpawnEntity>,
+                mut spawn_responses: EventWriter<AethaumSpawnEntityResponse>,
                 mut commands: Commands,
             ) {
                 for event in events.read() {
                     if event.prototype_name == stringify!(#name) {
                         let entity = #name::spawn(&mut commands);
-                        if let Some(response) = &event.entity_response {
-                            let _ = response.send(entity);
-                        }
+                        // 发送响应事件
+                        spawn_responses.send(AethaumSpawnEntityResponse {
+                            request_id: event.request_id,
+                            entity,
+                        });
                     }
                 }
             }
@@ -319,7 +324,7 @@ impl Transpile for System {
                 let handler_system_name = Ident::new(
                     &format!("{}_on_{}",
                              self.normal.name.to_lowercase(),
-                             event_handler.watch_for.as_path_str().to_lowercase()),
+                             event_handler.watch_for.name.as_str().to_lowercase()),
                     Span::call_site()
                 );
                 let event_module_path = match &event_handler.watch_for.module_name {
@@ -376,32 +381,90 @@ impl Transpile for System {
 }
 impl Transpile for EcsModule {
     fn transpile(&self) -> Result<TokenStream, TranspileError> {
-        let components_token = if let Some(components) = &self.components {
+        let mut external_module = vec![];
+        let mut recorded_external_modules = HashSet::new();
+        //components
+        let (components_token, components_to_register) = if let Some(components) = &self.components {
             components.iter()
-                .map(|component| component.transpile().unwrap())
-                .collect::<Vec<_>>()
+                .map(|component| {
+                    let component_name = Ident::new(component.name.as_str(), Span::call_site());
+                    (component.transpile().unwrap(),quote! {components::#component_name})
+                })
+                .collect::<(Vec<_>,Vec<_>)>()
             //ROBUST: this transpile could never fail
         }else {
-            vec![]
+            (vec![],vec![])
         };
-        let events_token = if let Some(events) = &self.events {
+        //events
+        let (events_token, events_to_register) = if let Some(events) = &self.events {
             events.iter()
-                .map(|event| event.transpile().unwrap())
-                .collect::<Vec<_>>()
+                .map(|event| {
+                    let event_name = Ident::new(event.name.as_str(), Span::call_site());
+                    (event.transpile().unwrap(),quote! {events::#event_name})
+                })
+                .collect::<(Vec<_>,Vec<_>)>()
         }else {
-            vec![]
+            (vec![],vec![])
         };
-        let entity_proto_token = if let Some(entity_protos) = &self.entity_protos {
+        //entity_protos
+        let (entity_proto_token,entity_protos_to_register) = if let Some(entity_protos) = &self.entity_protos {
             entity_protos.iter()
-                .map(|entity_prototype| entity_prototype.transpile().unwrap())
-                .collect::<Vec<_>>()
+                .map(|entity_prototype| {
+                    entity_prototype.components.iter()
+                        .for_each(|component_ref| {
+                            if let Some(module_name) = &component_ref.module_name {
+                                if module_name.as_str() != self.name.as_str() && recorded_external_modules.insert(module_name.as_str()){
+                                    let extern_module = Ident::new(module_name.as_str(), Span::call_site());
+                                    external_module.push(
+                                        quote! {use crate::modules::#extern_module;}
+                                    );
+                                }
+                            }
+                        });
+                    let spawn_entity_system = format!("spawn_{}_system", entity_prototype.name.to_lowercase());
+                    let spawn_entity_system = Ident::new(spawn_entity_system.as_str(), Span::call_site());
+                    (entity_prototype.transpile().unwrap(),quote! {entity_protos::#spawn_entity_system})
+                })
+                .collect::<(Vec<_>,Vec<_>)>()
         }else {
-            vec![]
+            (vec![],vec![])
         };
+
+        //systems
         let mut errors = vec![];
+        let mut systems_to_register = vec![];
         let systems_token = if let Some(systems) = &self.systems {
             systems.iter()
                 .map(|system| {
+                    system.queries.iter()
+                    .for_each(|query| {
+                        query.component_constraint.chained_iter()
+                            .for_each(|component_ref| {
+                                if let Some(module_name) = &component_ref.module_name {
+                                    if module_name.as_str() != self.name.as_str() && recorded_external_modules.insert(module_name.as_str()){
+                                        let extern_module = Ident::new(module_name.as_str(), Span::call_site());
+                                        external_module.push(
+                                            quote! {use crate::modules::#extern_module;}
+                                        );
+                                    }
+                                }
+                            })
+                    });
+                    //record system names for bevy registering
+                    let system_ident = Ident::new(system.normal.name.as_str(), Span::call_site());
+                    let update_system_ident = {
+
+                        quote! {systems::#system_ident::update}
+                    };
+                    systems_to_register.push(update_system_ident);
+                    let system_event_handlers_ident = system.event_handlers.iter()
+                        .map(|event_handler| {
+                            let event_handler_str = format!("{}_on_{}", system.normal.name.as_str().to_lowercase(), event_handler.watch_for.name.as_str().to_lowercase());
+                            let system_event_handler_ident = Ident::new(event_handler_str.as_str(), Span::call_site());
+                            quote! {systems::#system_ident::#system_event_handler_ident}
+                        });
+                    systems_to_register.extend(system_event_handlers_ident);
+                    //do the transpile
                     match system.transpile() {
                         Ok(token) => token,
                         Err(err) => {
@@ -421,10 +484,53 @@ impl Transpile for EcsModule {
                 return Err(TranspileError::Multiple { errors});
             }
         }
+        let module_name = Ident::new(&self.name, Span::call_site());
+        let plugin_name = Ident::new(&format!("{}Plugin", self.name.as_str()), Span::call_site());
+
+        //Plugin registration tokens
+        let components_registration = if !components_to_register.is_empty() {
+            quote! {
+                #(
+                    app.register_type::<#components_to_register>();
+                )*
+            }
+        }else {
+            quote! {}
+        };
+        let events_registration = if !events_to_register.is_empty() {
+            quote! {
+                #(
+                    app.add_event::<#events_to_register>();
+                )*
+            }
+        }else {
+            quote! {}
+        };
+        let systems_registration = if !systems_to_register.is_empty() {
+            quote! {
+                app.add_systems(Update, (#(#systems_to_register),*));
+            }
+        }else {
+            quote! {}
+        };
+        let entity_protos_registration = if !entity_protos_to_register.is_empty() {
+            quote! {
+                #(
+                    app.add_systems(Update, #entity_protos_to_register);
+                )*
+            }
+        }else {
+            quote! {}
+        };
+
         Ok(
             quote! {
-                use bevy::prelude::*;
-                use aethaum_predefined::*;
+                //! Auto-generated by Aethaum
+                use bevy_ecs::prelude::*;
+                use bevy_app::{Plugin, App, Update};
+                use bevy_reflect::Reflect;
+                use crate::aethaum_predefined::*;
+                #(#external_module)*
 
                 pub mod components {
                     use super::*;
@@ -442,6 +548,23 @@ impl Transpile for EcsModule {
                 pub mod systems {
                     use super::*;
                     #(#systems_token)*
+                }
+                pub struct #plugin_name;
+
+                impl Plugin for #plugin_name {
+                    fn build(&self, app: &mut App) {
+                        // 注册组件
+                        #components_registration
+
+                        // 注册事件
+                        #events_registration
+
+                        // 注册系统组
+                        #systems_registration
+
+                        // 注册实体原型系统
+                        #entity_protos_registration
+                    }
                 }
             }
         )
