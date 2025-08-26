@@ -155,7 +155,7 @@ priority = 20
 logic_file = "scripts/entity_heal.lua"
 ```
 
-The result data for a query is EntityId, which is available in "update" and all the event_handlers. You can directly accessed them in your lua code.
+The result data for a query is Entity, which is available in "update" and all the event_handlers. You can directly accessed them in your lua code.
 
 ### 🧩 components/*.toml - Component Definitions
 
@@ -203,6 +203,7 @@ description = "Y coordinate"
 Some Identifiers are **reserved** and thus can't be used as event name, like:
 
 - AethaumSpawnEntity
+- AethaumSpawnEntityResponse
 
 ### ⚡ events/*.toml - Event Definitions
 
@@ -224,7 +225,7 @@ description = "Damage value"
 
 [[events.fields]]
 name = "attacker"
-type = "EntityId" #Primitive Type
+type = "Entity" #Primitive Type
 description = "Attacker ID"
 
 # Heal event
@@ -239,7 +240,7 @@ description = "Heal amount"
 
 [[events.fields]]
 name = "healer"
-type = "EntityId"
+type = "Entity"
 description = "Healer ID"
 ```
 

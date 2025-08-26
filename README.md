@@ -222,7 +222,7 @@ description = "伤害值"
 
 [[events.fields]]
 name = "attacker"
-type = "EntityId" #原生类型
+type = "Entity" #原生类型
 description = "攻击者ID"
 
 # 治疗事件
@@ -237,13 +237,14 @@ description = "治疗量"
 
 [[events.fields]]
 name = "healer"
-type = "EntityId"
+type = "Entity"
 description = "治疗者ID"
 ```
 
 有一些标识**不可以**作为事件名称，它们被Aethaum保留，例如：
 
 - AethaumSpawnEntity
+- AethaumSpawnEntityResponse
 
 ### 🏗️ entity_protos/*.toml - 实体原型
 
