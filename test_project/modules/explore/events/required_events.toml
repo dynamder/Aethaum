@@ -15,7 +15,7 @@ description = "伤害值"
 
 [[events.fields]]
 name = "attacker"
-type = "EntityId" #原生类型
+type = "Entity" #原生类型
 description = "攻击者ID"
 
 # 治疗事件
@@ -30,5 +30,5 @@ description = "治疗量"
 
 [[events.fields]]
 name = "healer"
-type = "EntityId"
+type = "Entity"
 description = "治疗者ID"
