@@ -68,3 +68,7 @@ pub fn lua_script_server() -> TokenStream {
         }
     }
 }
+#[derive(Resource)]
+pub struct LuaCommands {
+
+}
