@@ -1,6 +1,7 @@
 use bevy_ecs::prelude::Res;
 use bevy_ecs::reflect::AppTypeRegistry;
-use bevy_reflect::TypeRegistry;
+use bevy_reflect::{Reflect, TypeRegistry};
+use bevy_reflect_derive::reflect_trait;
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -24,4 +25,7 @@ pub fn get_type_id_by_str(type_name: &str, type_registry: &TypeRegistry) -> Opti
         .map(|registration| registration.type_id())
 }
 // 其他反射相关功能
-
+#[reflect_trait]
+pub trait ToLua {
+    fn to_lua(&self, lua: &mlua::Lua) -> Result<mlua::Value, mlua::Error>;
+}
