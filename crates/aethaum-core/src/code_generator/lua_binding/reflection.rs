@@ -1,7 +1,8 @@
 use bevy_ecs::prelude::Res;
 use bevy_ecs::reflect::AppTypeRegistry;
-use bevy_reflect::{Reflect, TypeRegistry};
+use bevy_reflect::{FromType, Reflect, TypeRegistry};
 use bevy_reflect_derive::reflect_trait;
+use mlua::FromLua;
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -28,4 +29,22 @@ pub fn get_type_id_by_str(type_name: &str, type_registry: &TypeRegistry) -> Opti
 #[reflect_trait]
 pub trait ToLua {
     fn to_lua(&self, lua: &mlua::Lua) -> Result<mlua::Value, mlua::Error>;
+}
+#[derive(Clone)]
+pub struct ReflectFromLua {
+    from_lua: fn(value: mlua::Value, lua: &mlua::Lua) -> mlua::Result<Box<dyn Reflect>>,
+}
+impl ReflectFromLua {
+    pub fn from_lua(&self, value: mlua::Value, lua: &mlua::Lua) -> mlua::Result<Box<dyn Reflect>> {
+        (self.from_lua)(value, lua)
+    }
+}
+impl<T: Reflect + FromLua> FromType<T> for ReflectFromLua {
+    fn from_type() -> Self {
+        ReflectFromLua {
+            from_lua: |value, lua| T::from_lua(value, lua).map(|reflect| {
+                Box::new(reflect) as Box<dyn Reflect>
+            }),
+        }
+    }
 }
